@@ -439,6 +439,8 @@ class Worker:
             for entry in stuck:  # handler ignored cancellation: release on its behalf
                 self._release(entry, "released (handler did not stop)")
         self._pool.shutdown(wait=False, cancel_futures=True)
+        # Let the heartbeat thread exit first so it cannot overwrite the final status.
+        self._heartbeat_thread.join(timeout=self.settings.heartbeat_seconds + 2)
         try:
             worker_heartbeat(self.engine, worker_id=self.id, in_flight=0, status="stopped")
         except DBAPIError:

@@ -1,0 +1,148 @@
+{
+  "timestamp": "2026-10-01T19:37:09+00:00",
+  "host": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 189 Stepping 1, GenuineIntel",
+    "python_client": "3.13.12"
+  },
+  "settings": {
+    "RELAYFLOW_ENABLE_FAULT_INJECTION": "0",
+    "RELAYFLOW_LEASE_SECONDS": "10",
+    "RELAYFLOW_HEARTBEAT_SECONDS": "3",
+    "RELAYFLOW_POLL_INTERVAL_SECONDS": "0.5",
+    "RELAYFLOW_SCHEDULER_INTERVAL_SECONDS": "1",
+    "RELAYFLOW_WORKER_CONCURRENCY": "4"
+  },
+  "scenarios": {
+    "throughput_noop_1x4": {
+      "mode": "prequeued",
+      "runs": 500,
+      "tasks": 500,
+      "failed_runs": 0,
+      "handler_time": {
+        "mean_ms": 5.6,
+        "p50_ms": 5.0,
+        "p95_ms": 7.2,
+        "max_ms": 72.1
+      },
+      "tasks_per_worker": {
+        "worker-a": 500
+      },
+      "makespan_s": 2.597,
+      "throughput_tasks_per_s": 192.5
+    },
+    "throughput_noop_2x4": {
+      "mode": "prequeued",
+      "runs": 500,
+      "tasks": 500,
+      "failed_runs": 0,
+      "handler_time": {
+        "mean_ms": 10.1,
+        "p50_ms": 8.7,
+        "p95_ms": 15.3,
+        "max_ms": 103.5
+      },
+      "tasks_per_worker": {
+        "worker-b": 251,
+        "worker-a": 249
+      },
+      "makespan_s": 2.352,
+      "throughput_tasks_per_s": 212.6
+    },
+    "throughput_sleep0.25_2x4": {
+      "mode": "prequeued",
+      "runs": 160,
+      "tasks": 160,
+      "failed_runs": 0,
+      "handler_time": {
+        "mean_ms": 257.2,
+        "p50_ms": 254.0,
+        "p95_ms": 262.2,
+        "max_ms": 346.8
+      },
+      "tasks_per_worker": {
+        "worker-b": 80,
+        "worker-a": 80
+      },
+      "makespan_s": 5.635,
+      "throughput_tasks_per_s": 28.4,
+      "ideal_makespan_s": 5.0,
+      "orchestration_overhead_s": 0.635,
+      "overhead_per_task_slot_ms": 31.8
+    },
+    "latency_noop_poll0.5": {
+      "mode": "paced every 0.2s",
+      "runs": 60,
+      "tasks": 60,
+      "failed_runs": 0,
+      "handler_time": {
+        "mean_ms": 4.5,
+        "p50_ms": 4.3,
+        "p95_ms": 5.9,
+        "max_ms": 6.8
+      },
+      "tasks_per_worker": {
+        "worker-b": 32,
+        "worker-a": 28
+      },
+      "dispatch_latency": {
+        "mean_ms": 259.8,
+        "p50_ms": 264.8,
+        "p95_ms": 481.3,
+        "max_ms": 498.9
+      }
+    },
+    "latency_noop_poll0.1": {
+      "mode": "paced every 0.2s",
+      "runs": 60,
+      "tasks": 60,
+      "failed_runs": 0,
+      "handler_time": {
+        "mean_ms": 6.5,
+        "p50_ms": 5.0,
+        "p95_ms": 7.3,
+        "max_ms": 53.3
+      },
+      "tasks_per_worker": {
+        "worker-a": 28,
+        "worker-b": 32
+      },
+      "dispatch_latency": {
+        "mean_ms": 54.7,
+        "p50_ms": 48.1,
+        "p95_ms": 100.1,
+        "max_ms": 102.0
+      }
+    }
+  },
+  "crash_recovery": [
+    {
+      "trial": 1,
+      "killed": "worker-a",
+      "first_attempt_status": "lease_expired",
+      "lease_expiry_after_last_heartbeat_s": 10.0,
+      "detected_after_lease_expiry_s": 0.089,
+      "reassigned_after_last_heartbeat_s": 11.056,
+      "reassigned_to": "worker-b"
+    },
+    {
+      "trial": 2,
+      "killed": "worker-a",
+      "first_attempt_status": "lease_expired",
+      "lease_expiry_after_last_heartbeat_s": 10.0,
+      "detected_after_lease_expiry_s": 0.102,
+      "reassigned_after_last_heartbeat_s": 11.07,
+      "reassigned_to": "worker-b"
+    },
+    {
+      "trial": 3,
+      "killed": "worker-a",
+      "first_attempt_status": "lease_expired",
+      "lease_expiry_after_last_heartbeat_s": 10.0,
+      "detected_after_lease_expiry_s": 0.697,
+      "reassigned_after_last_heartbeat_s": 11.666,
+      "reassigned_to": "worker-b"
+    }
+  ]
+}

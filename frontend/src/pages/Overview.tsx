@@ -13,9 +13,9 @@ export function OverviewPage() {
   if (!overview.data) return overview.error ? <ErrorBox error={overview.error} onRetry={overview.refresh} /> : null;
   const o = overview.data;
   const healthy = o.workers.filter((w) => w.healthy).length;
-  // Current view: healthy workers plus anything that went silent in the last 5 minutes (e.g. a
+  // Current view: healthy workers plus anything that went silent in the last 2 minutes (e.g. a
   // worker you just killed). Older stopped/stale instances are history, collapsed below.
-  const current = o.workers.filter((w) => w.healthy || (w.status !== "stopped" && w.heartbeat_age_seconds < 300));
+  const current = o.workers.filter((w) => w.healthy || (w.status !== "stopped" && w.heartbeat_age_seconds < 120));
   const history = o.workers.filter((w) => !current.includes(w));
 
   return (
