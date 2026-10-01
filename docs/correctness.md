@@ -1,0 +1,65 @@
+# Correctness: guarantees and the tests that verify them
+
+Each row maps a guarantee or invariant from `docs/architecture.md` to the tests that check
+it. Test ids are `file::test`. Paths are relative to `tests/`. Owner `T` = test agent
+(`tests/correctness/`), `M` = main agent. **Append new rows. Don't reorder existing ones.**
+
+How to run the correctness suite (separate database, so it can run alongside other suites):
+
+```
+RELAYFLOW_TEST_DATABASE_URL=postgresql+psycopg://relayflow:relayflow@127.0.0.1:5433/relayflow_test_agent2 \
+  uv run pytest tests/correctness -q            # add -m "not slow" to skip subprocess tests
+```
+
+Every test that uses the `engine` fixture also runs `relayflow.testing.check_invariants`
+at teardown (autouse fixture in `tests/correctness/conftest.py`). Most scenarios also
+call it explicitly.
+
+## Guarantees and invariants
+
+| # | Guarantee / invariant (spec §) | Verified by | Owner | Status |
+|---|---|---|---|---|
+| G1 | A queued task is claimed by at most one claimer, even under concurrent claims (6.3, `SKIP LOCKED`) | `correctness/test_competing_claims.py::test_threads_claim_each_task_exactly_once`, `::test_processes_claim_each_task_exactly_once` | T | pass |
+| G2 | At most one running attempt per task, enforced by PostgreSQL (3, 8) | `correctness/test_db_invariants.py::test_second_running_attempt_for_a_task_is_rejected`, `correctness/test_competing_claims.py::test_concurrent_claim_fail_reclaim_keeps_one_running_attempt` (live monitor) | T | pass |
+| G3 | Attempt numbers are unique and contiguous; `attempt_count` matches history (3, 6.10) | `correctness/test_competing_claims.py::test_concurrent_claim_fail_reclaim_keeps_one_running_attempt`, `correctness/test_manual_retry.py::test_retry_twice_keeps_increasing_attempt_numbers`, `correctness/test_db_invariants.py::test_duplicate_attempt_number_and_lease_token_rejected` | T | pass |
+| G4 | A task is dispatched only after all its dependencies succeeded (T3, 8) | `correctness/test_dependency_ordering.py::test_chain_is_strictly_sequential`, `::test_diamond_join_waits_for_both_parents`, `::test_concurrent_workers_never_claim_before_dependencies` | T | pass |
+| G5 | Concurrent sibling completions still promote the shared child exactly once (2.1 per-run lock) | `correctness/test_dependency_ordering.py::test_concurrent_sibling_completions_promote_shared_child` (x10), `::test_wide_fan_in_promotes_child_exactly_once` | T | pass |
+| G6 | Task input is materialized from dependency outputs when queued (6.2) | `correctness/test_dependency_ordering.py::test_chain_is_strictly_sequential`, `::test_diamond_join_waits_for_both_parents`, `correctness/test_manual_retry.py::test_retry_in_diamond_keeps_sibling_output` | T | pass |
+| G7 | A stale token (expired or superseded) can't heartbeat or change task, run, or output state; reports return `False` and change nothing (5.3, 6.5, 8) | `correctness/test_stale_ownership.py::test_expired_token_is_rejected_everywhere_and_changes_nothing`, `::test_new_attempt_token_works_and_old_token_cannot_touch_it`, `::test_random_token_is_rejected` | T | pass |
+| G8 | A lapsed lease is never revived, even before the scheduler runs (6.4) | `correctness/test_stale_ownership.py::test_heartbeat_cannot_revive_lapsed_lease_before_scheduler_runs`, `::test_completion_racing_recovery_has_exactly_one_winner` | T | pass |
+| G9 | Heartbeats renew live leases; recovery skips them (6.4, 6.6) | `correctness/test_stale_ownership.py::test_heartbeat_renews_live_lease_so_recovery_skips_it` | T | pass |
+| G10 | Lease expiry → `lease_expired`, retry (T6) or fail (T7); several schedulers are safe (6.6) | `correctness/test_stale_ownership.py::test_lease_expiry_exhausts_max_attempts_then_fails_run`, `::test_concurrent_schedulers_expire_each_attempt_exactly_once` | T | pass |
+| G11 | A crashed worker's task is reassigned to another worker after lease expiry (6.6, 8) | `correctness/test_process_crashes.py::test_killed_worker_task_is_reassigned_after_lease_expiry`, `::test_many_runs_across_workers_with_a_crash` | T | pass (slow) |
+| G12 | `max_attempts` counts failed, timed_out, and lease_expired attempts; released and cancelled attempts don't count (5.2) | `correctness/test_retries_and_failures.py::test_max_attempts_counts_failed_timed_out_and_lease_expired`, `::test_released_attempts_do_not_count_against_max_attempts` | T | pass |
+| G13 | Backoff delay ∈ [raw/2, raw], raw = min(max, base·2^(n−1)); not claimable before `available_at` (6.7) | `correctness/test_retries_and_failures.py::test_backoff_delay_function_bounds`, `::test_requeue_available_at_matches_backoff_formula`, `::test_requeue_delay_with_default_rng_is_within_bounds` | T | pass |
+| G14 | Non-retryable errors fail the task immediately (6.7) | `correctness/test_retries_and_failures.py::test_non_retryable_error_fails_immediately_and_blocks_descendants` | T | pass |
+| G15 | A terminal failure blocks transitive descendants; independent branches finish; the run fails only when nothing is pending, queued, or running (T9, R3, 6.8) | `correctness/test_retries_and_failures.py::test_terminal_failure_blocks_descendants_while_independent_branch_finishes`, `::test_run_fails_at_the_moment_the_last_branch_fails`, `::test_transitive_descendants_blocked_in_diamond` | T | pass |
+| G16 | A run succeeds iff every task succeeded; `finished_at` iff terminal (R2, 3) | `correctness/test_retries_and_failures.py::test_run_succeeds_only_when_every_task_succeeded`, `correctness/test_db_invariants.py::test_check_constraints` | T | pass |
+| G17 | Timeout backstop: the scheduler marks a still-heartbeating attempt `timed_out` after timeout + grace; timeouts are retryable and counted (6.6, 7.2) | `correctness/test_timeouts.py::test_scheduler_backstop_times_out_heartbeating_attempt`, `::test_large_grace_defers_backstop`, `::test_worker_reported_timeout_is_counted`, `correctness/test_process_crashes.py::test_worker_reported_timeout_with_real_processes` | T | pass |
+| G18 | Cancel: pending/queued tasks → cancelled; no running task → cancelled at once; otherwise cancelling until a cooperative acknowledgement (R4, R5, T10, T11) | `correctness/test_cancellation.py::test_cancel_with_nothing_running_cancels_immediately`, `::test_cancel_with_running_task_waits_for_cooperative_ack`, `correctness/test_process_crashes.py::test_cooperative_cancel_with_real_worker` | T | pass |
+| G19 | Completion vs cancel, in both orders: completion is still recorded with its output, children are not promoted, and the run ends cancelled (6.9) | `correctness/test_cancellation.py::test_completion_before_cancel`, `::test_cancel_before_completion_still_records_success`, `::test_concurrent_cancel_and_completion` (x8) | T | pass |
+| G20 | Cancel on a terminal run is rejected; cancel is idempotent while cancelling (5.1) | `correctness/test_cancellation.py::test_cancel_on_terminal_run_is_rejected`, `::test_cancel_is_idempotent_while_cancelling` | T | pass |
+| G21 | Claims skip cancel-requested runs; heartbeat reports `cancel_requested` (6.3, 6.4) | `correctness/test_cancellation.py::test_claim_skips_runs_with_cancel_requested`, `::test_cancel_with_running_task_waits_for_cooperative_ack` | T | pass |
+| G22 | Failure, expiry, or release while cancelling → task cancelled, no retry (T12) | `correctness/test_cancellation.py::test_failure_or_release_while_cancelling_cancels_task`, `correctness/test_stale_ownership.py::test_lease_expiry_while_cancelling_cancels_task_without_retry` | T | pass |
+| G23 | Claim and cancel race without errors or deadlock; claim never waits on a run lock (2.1, 6.3, 6.9) | `correctness/test_lock_ordering.py::test_claim_does_not_wait_on_run_lock`, `::test_cancel_and_claim_do_not_deadlock`, `::test_claim_lock_pattern_does_not_deadlock_with_cancel`, `correctness/test_cancellation.py::test_concurrent_claims_and_cancels` | T | **FAIL: bug D1 in `docs/spec-review.md`** |
+| G24 | Manual retry only from `failed` (5.1 R6) | `correctness/test_manual_retry.py::test_retry_rejected_unless_failed`, `::test_concurrent_retries_apply_once`, `::test_retry_unknown_run_raises` | T | pass |
+| G25 | Manual retry preserves succeeded outputs byte for byte and doesn't re-execute them; failed→queued, blocked→pending; `failure_count` reset; history kept (T13, T14, 6.10, 8) | `correctness/test_manual_retry.py::test_retry_preserves_succeeded_outputs_and_resets_failures`, `::test_retry_twice_keeps_increasing_attempt_numbers`, `::test_retry_unblocks_chain_and_promotes_only_ready_tasks`, `::test_retry_in_diamond_keeps_sibling_output` | T | pass |
+| G26 | Idempotent submission: concurrent same key+payload → one run, exactly one `created=True`; different payload → `IdempotencyConflict` (6.1) | `correctness/test_idempotent_submission.py::test_concurrent_threads_same_key_create_one_run`, `::test_concurrent_threads_mixed_payloads`, `::test_concurrent_processes_same_key_create_one_run`, `::test_conflicting_payload_raises_and_does_not_create`, `::test_key_order_insensitive_and_version_resolution`, `::test_no_key_means_distinct_runs` | T | pass |
+| G27 | Database-enforced immutability: definitions, run snapshot and identity, succeeded output and status, final attempts, lease tokens (3) | `correctness/test_db_invariants.py::test_run_snapshot_and_identity_are_immutable`, `::test_workflow_definitions_are_immutable`, `::test_succeeded_task_output_and_status_are_final`, `::test_final_attempt_cannot_change_and_token_is_immutable`, `::test_duplicate_idempotency_key_rejected_by_database`, `::test_check_constraints` | T | pass |
+| G28 | At-least-once execution plus receiver idempotency: a crash after the external effect gives one logical notification, delivered twice (7.3, 8, 9.1) | `correctness/test_process_crashes.py::test_crash_after_external_effect_delivers_one_logical_notification` | T | pass (slow) |
+| G29 | Database connection loss: processes reconnect and finish correctly; an aborted transaction leaves no trace; an unreachable DB raises instead of corrupting state (2, 7.3) | `correctness/test_process_crashes.py::test_database_connections_terminated_mid_run`, `::test_terminated_report_transaction_is_rolled_back`, `::test_unreachable_database_raises_and_changes_nothing` | T | pass |
+| G30 | Graceful shutdown releases in-flight attempts (T8, not counted, immediately claimable) and marks the worker stopped (7.4) | `correctness/test_process_crashes.py::test_graceful_shutdown_releases_in_flight_attempt` (Windows: `CTRL_BREAK_EVENT`) | T | pass (slow) |
+| G31 | Oversized output is rejected without changing state (6.2, 6.5) | `correctness/test_retries_and_failures.py::test_oversized_output_is_rejected_without_changing_state` | T | pass |
+
+## Explicit exclusions (not guaranteed, not tested)
+
+| Exclusion | Why |
+|---|---|
+| Exactly-once execution | Not provided (spec 8). A handler may run more than once: after a crash between effect and acknowledgement, or after a slow worker's lease expires. G28 checks at-least-once plus receiver idempotency instead. |
+| Duplicate external effects at receivers *without* idempotency | Lease tokens protect only RelayFlow's tables (7.3). A stale process can still call external services. |
+| Durability beyond PostgreSQL's own guarantees (power loss, disk failure, `fsync=off`) | We rely on PostgreSQL WAL and fsync. There are no power-cut tests. |
+| Data-race detection inside Python | Python has no equivalent of Go's `-race`. We use multi-thread tests with `threading.Barrier`, multi-process tests, deterministic lock interleavings (an admin row lock pauses a real operation at a known point), and invariant SQL after every scenario. |
+| Stopping a stuck handler | Python threads can't be killed. Timeouts are cooperative, and the scheduler backstop only re-queues the task. The stuck thread keeps its slot (7.2). |
+| Worker clock skew | All ownership decisions use PostgreSQL `now()`. Worker clocks are only used for local fail-safe deadlines. |
+| Security, authentication, multi-tenant isolation | Out of scope (educational project). |
+| Performance and throughput | Benchmarks live in `scripts/bench.py`, not in correctness tests. |

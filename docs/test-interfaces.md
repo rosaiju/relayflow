@@ -140,3 +140,9 @@ submitted with `allow_fault_injection=True` (API: server env flag):
   code 137 without reporting (simulates a crash after an external effect).
 * `input.demo.delay_seconds = {task_key: s}` → cooperative delay before the
   handler (always allowed, 0..30 s).
+
+## Helpers added after the spec review (v1.1)
+* `start_worker_process(..., new_process_group=True)` + `stop_gracefully(proc)` —
+  graceful stop via `CTRL_BREAK_EVENT` (Windows) or SIGTERM.
+* `lock_waiters(engine, query_pattern) -> int` — counts RelayFlow sessions waiting on a
+  row lock (pg_stat_activity), for deterministic lock interleavings.

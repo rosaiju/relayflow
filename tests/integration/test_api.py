@@ -38,7 +38,7 @@ def test_submit_and_read_run(api_client: TestClient) -> None:
         "report": "pending",
         "notify": "pending",
     }
-    assert [t["task_key"] for t in run["tasks"]][0] == "validate"
+    assert run["tasks"][0]["task_key"] == "validate"
     listed = api_client.get("/api/runs", params={"status": "running"}).json()
     assert listed["total"] == 1 and listed["items"][0]["title"] == "Field notes"
     events = api_client.get(f"/api/runs/{run['id']}/events").json()

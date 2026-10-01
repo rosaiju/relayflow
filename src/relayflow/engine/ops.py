@@ -139,7 +139,7 @@ def _event(
 
 def _lock_run(conn: Connection, run_id: UUID) -> RowMapping:
     row = (
-        conn.execute(text("SELECT * FROM runs WHERE id = :id FOR UPDATE"), {"id": run_id})
+        conn.execute(text("SELECT * FROM runs WHERE id = :id FOR NO KEY UPDATE"), {"id": run_id})
         .mappings()
         .first()
     )
@@ -150,7 +150,7 @@ def _lock_run(conn: Connection, run_id: UUID) -> RowMapping:
 
 def _lock_task(conn: Connection, task_id: UUID) -> RowMapping:
     row = (
-        conn.execute(text("SELECT * FROM tasks WHERE id = :id FOR UPDATE"), {"id": task_id})
+        conn.execute(text("SELECT * FROM tasks WHERE id = :id FOR NO KEY UPDATE"), {"id": task_id})
         .mappings()
         .one()
     )
@@ -189,7 +189,7 @@ def _set_run_status(conn: Connection, run: Row, new: RunStatus, extra_sql: str =
 def _task_rows(conn: Connection, run_id: UUID, *, lock: bool = False) -> list[RowMapping]:
     sql = "SELECT * FROM tasks WHERE run_id = :run_id ORDER BY created_at, task_key"
     if lock:
-        sql += " FOR UPDATE"
+        sql += " FOR NO KEY UPDATE"
     return list(conn.execute(text(sql), {"run_id": run_id}).mappings())
 
 
@@ -501,7 +501,7 @@ def claim_task(engine: Engine, *, worker_id: str, lease_seconds: float) -> Claim
                     "WHERE t.status = 'queued' AND t.available_at <= now() "
                     "AND r.status = 'running' AND r.cancel_requested_at IS NULL "
                     "ORDER BY t.available_at, t.created_at "
-                    "LIMIT 1 FOR UPDATE OF t SKIP LOCKED"
+                    "LIMIT 1 FOR NO KEY UPDATE OF t SKIP LOCKED"
                 )
             )
             .mappings()
@@ -636,7 +636,7 @@ def _owned_attempt(
         conn.execute(
             text(
                 "SELECT * FROM attempts WHERE id = :id AND lease_token = :token "
-                "AND status = 'running' AND lease_expires_at > now() FOR UPDATE"
+                "AND status = 'running' AND lease_expires_at > now() FOR NO KEY UPDATE"
             ),
             {"id": attempt_id, "token": lease_token},
         )
@@ -890,7 +890,7 @@ def _recover_one(
         conn.execute(
             text(
                 "SELECT a.* FROM attempts a JOIN tasks t ON t.id = a.task_id "
-                f"WHERE a.id = :id AND a.status = 'running' AND {condition} FOR UPDATE OF a"
+                f"WHERE a.id = :id AND a.status = 'running' AND {condition} FOR NO KEY UPDATE OF a"
             ),
             {"id": attempt_id, "grace": grace},
         )

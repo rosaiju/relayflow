@@ -36,6 +36,7 @@ packages = ["src/relayflow", "src/mocknotify"]
 line-length = 100
 target-version = "py313"
 src = ["src", "tests", "scripts"]
+extend-exclude = ["*.md", "frontend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

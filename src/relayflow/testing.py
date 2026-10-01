@@ -7,6 +7,7 @@ lease-expiry situations deterministically instead of sleeping and hoping.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -25,10 +26,12 @@ __all__ = [
     "events_for",
     "force_available_now",
     "force_lease_expiry",
+    "lock_waiters",
     "run_status",
     "start_mocknotify_process",
     "start_scheduler_process",
     "start_worker_process",
+    "stop_gracefully",
     "task_states",
     "wait_for",
 ]
@@ -178,12 +181,52 @@ def _child_env(db_url: str, extra: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def start_worker_process(
-    db_url: str, *, name: str, concurrency: int = 2, env: Mapping[str, str] | None = None
+    db_url: str,
+    *,
+    name: str,
+    concurrency: int = 2,
+    env: Mapping[str, str] | None = None,
+    new_process_group: bool = False,
 ) -> subprocess.Popen[bytes]:
+    """Start `python -m relayflow.worker`. Use new_process_group=True if the test will call
+    stop_gracefully() (on Windows, CTRL_BREAK_EVENT only reaches a separate process group)."""
     child_env = _child_env(db_url, env)
     child_env["RELAYFLOW_WORKER_NAME"] = name
     child_env["RELAYFLOW_WORKER_CONCURRENCY"] = str(concurrency)
-    return subprocess.Popen([sys.executable, "-m", "relayflow.worker"], env=child_env)
+    flags = 0
+    if new_process_group and sys.platform == "win32":
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(
+        [sys.executable, "-m", "relayflow.worker"],
+        env=child_env,
+        creationflags=flags,
+        start_new_session=new_process_group and sys.platform != "win32",
+    )
+
+
+def stop_gracefully(proc: subprocess.Popen[bytes], timeout: float = 20.0) -> int:
+    """Ask a worker/scheduler to shut down gracefully (SIGTERM, or CTRL_BREAK_EVENT on
+    Windows) and wait for it to exit. Returns the exit code."""
+    if sys.platform == "win32":
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        proc.send_signal(signal.SIGTERM)
+    return proc.wait(timeout=timeout)
+
+
+def lock_waiters(engine: Engine, query_pattern: str) -> int:
+    """Number of RelayFlow sessions currently waiting on a row lock while running a query
+    that matches `query_pattern` (SQL LIKE). Used to build deterministic interleavings."""
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'relayflow' "
+                    "AND wait_event_type = 'Lock' AND query LIKE :pattern"
+                ),
+                {"pattern": query_pattern},
+            ).scalar_one()
+        )
 
 
 def start_scheduler_process(

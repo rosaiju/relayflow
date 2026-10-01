@@ -1,6 +1,6 @@
 # RelayFlow architecture and specification
 
-Version 1.0. This document is the agreed contract for the engine, the API, the
+Version 1.1. This document is the agreed contract for the engine, the API, the
 tests, and the dashboard. If code disagrees with this document, one of them is a
 bug; fix the code or amend this document deliberately (and note it in the
 changelog at the bottom).
@@ -29,7 +29,7 @@ isolation, and it has been exercised only on the environments listed in
 |--------------|--------------------------------|----------------|
 | `api`        | `relayflow.api.app`            | Validates and records definitions and runs; reads state; requests cancel/retry. **Never executes tasks.** |
 | `worker`     | `relayflow.worker.main`        | Claims ready tasks, executes registered handlers in a bounded thread pool, heartbeats leases, reports results. Any number of worker processes may run. |
-| `scheduler`  | `relayflow.scheduler.main`     | Recovery loop: expires lapsed leases, enforces timeouts as a backstop, marks silent workers stale. More than one may run safely. |
+| `scheduler`  | `relayflow.scheduler.main`     | Recovery loop: expires lapsed leases and enforces timeouts as a backstop. Worker staleness is derived at read time. More than one may run safely. |
 | `mocknotify` | `mocknotify.app`               | Independent mock "notification service" with its own database and idempotency records. |
 | `dashboard`  | `frontend/`                    | React + TypeScript UI that polls the API. |
 
@@ -64,6 +64,14 @@ lock. Run-level transitions (complete, fail, expire, cancel, retry) first take
 serializes all state transitions within one run (preventing, for example, two
 sibling tasks completing concurrently and both failing to see that their shared
 child became ready). Different runs proceed fully in parallel.
+
+**Lock mode.** All row locks use `FOR NO KEY UPDATE` (never `FOR UPDATE`). Inserting a
+row with a foreign key takes `FOR KEY SHARE` on the referenced row; `FOR UPDATE` would
+conflict with it, so a claim inserting an attempt (FK → runs) would wait on — and could
+deadlock with — a run-level transition such as cancel. `FOR NO KEY UPDATE` still
+serializes run transitions against each other but does not conflict with FK checks. No
+code path updates key columns. (Found by the independent test suite:
+`tests/correctness/test_lock_ordering.py`.)
 
 ## 3. Data model
 
@@ -231,15 +239,20 @@ rejected (409). Retry on anything other than `failed` is rejected (409).
 `succeeded`, `cancelled` are final for a task. `failed` and `blocked` change only
 through manual retry. `failure_count` counts `failed`, `timed_out`, and
 `lease_expired` attempts. `released` and `cancelled` attempts do not count.
+After a counted failure, `failure_count` is incremented **first**; the task is re-queued
+iff the error is retryable and the *new* `failure_count < max_attempts`. So
+`max_attempts` is the total number of counted attempts a task may make.
 
 ### 5.3 Attempt states
 
 `running` → one of `succeeded`, `failed`, `timed_out`, `lease_expired`,
-`cancelled`, `released`. All are final. Only an attempt in `running` whose
+`cancelled`, `released`. All are final (a trigger rejects changing a final attempt). Only an attempt in `running` whose
 `lease_token` matches and whose lease has not expired (`lease_expires_at >
 now()`) may be heartbeated or reported by its worker. The scheduler may move a
 `running` attempt to `lease_expired` (lease lapsed) or `timed_out`
-(`now() > started_at + timeout_seconds + timeout_grace`).
+(`now() >= started_at + timeout_seconds + timeout_grace`). When both conditions hold,
+lease expiry is checked first, so the attempt is recorded as `lease_expired`; both count
+as one failure.
 
 ## 6. Execution
 
@@ -252,7 +265,10 @@ already exists, it reads the existing run: same `request_hash` → returns that 
 with `created = false` (HTTP 200); different hash → `IdempotencyConflict`
 (HTTP 409). The unique constraint, not a Python check, guarantees that
 concurrent submissions with one key produce one run. All tasks are inserted in
-the same transaction as the run (T1/T2).
+the same transaction as the run (T1/T2). Idempotency keys are global (not per
+workflow) and never expire. The hash uses the *resolved* version, so re-using a key
+without `workflow_version` after a newer version is registered is a conflict (409); pass
+the version explicitly to make retries robust to new versions.
 
 ### 6.2 Task input materialization
 
@@ -314,7 +330,12 @@ scheduler has not yet expired it. The same thread updates `workers.last_heartbea
    descendants (T9); finalize the run (R2, R3, R5); write events.
 
 Completion stores the output and marks the task succeeded atomically, so a
-completed output is never lost and never half-written.
+completed output is never lost and never half-written. Output must be a JSON object of
+at most 64 KiB; otherwise `complete_attempt` raises `ValidationFailed` without changing
+state, and the worker reports a **non-retryable** failure (T7) instead.
+
+`cancel_attempt` on a run that is *not* cancelling (the handler stopped for another
+reason) behaves exactly like `release_attempt` (T8).
 
 ### 6.6 Recovery (scheduler)
 
@@ -327,8 +348,9 @@ Every `scheduler_interval_seconds` the scheduler:
 2. does the same for attempts past `started_at + timeout_seconds +
    timeout_grace_seconds` (status `timed_out`) — a backstop for a worker that
    keeps heartbeating but cannot stop a stuck handler;
-3. marks workers whose heartbeat is older than `lease_seconds` as stale (derived
-   at read time; nothing to write).
+3. nothing for workers: a worker is *stale* when its heartbeat is older than
+   `lease_seconds`, derived at read time. A hard-killed worker's row keeps
+   `status = 'active'`; the dashboard shows it as stale and later as history.
 
 Running several schedulers is safe: each transition is guarded by the re-check
 under lock.
@@ -392,7 +414,11 @@ cancelling, succeeded, cancelled). Then, in one transaction:
   keeps increasing so attempt numbers stay unique and history is preserved;
 * `blocked` → `pending` (T14), then any pending task whose dependencies all
   succeeded → `queued`;
+* re-queued tasks get `available_at = now()`, `finished_at = NULL` and a freshly
+  materialized `input` (identical, because dependency outputs never change);
+  `last_error` is kept for reference until the next attempt finishes;
 * run → `running` (R6), `manual_retry_count += 1`, `finished_at`/`error` cleared;
+* there is no limit on the number of manual retries (educational scope);
 * event `run_retried`.
 
 ## 7. Worker
@@ -422,6 +448,13 @@ capped backoff). Reports that fail because the database is down are retried
 until the local deadline passes; after that they are abandoned and the
 scheduler re-queues the task.
 
+Heartbeats run on a Python thread. A handler that holds the GIL for a long time in C
+code, a long GC pause, or a very slow database can delay heartbeats past the lease; the
+task is then re-executed while the first execution may still be running. This is
+another source of at-least-once duplicates, alongside crashes. Keep
+`lease_seconds ≥ 3 × heartbeat_seconds` (defaults 10 s / 3 s); the code enforces only
+`heartbeat_seconds < lease_seconds / 2`.
+
 **Engine-state protection is not external-effect protection.** Tokens stop a
 stale worker from changing RelayFlow's tables. They cannot stop a stale process
 that is still running from calling an external service. That is why the notify
@@ -432,7 +465,11 @@ at-least-once.
 On SIGTERM/SIGINT: stop claiming; keep heartbeating while in-flight tasks finish,
 up to `shutdown_grace_seconds`; then set cancellation flags and release
 (`release_attempt`, T8) any attempt still owned, so it is re-queued immediately
-instead of waiting for lease expiry; mark the worker `stopped`.
+instead of waiting for lease expiry; mark the worker `stopped`. In Docker,
+`docker compose stop` sends SIGTERM. On Windows another process cannot deliver
+SIGTERM (`Popen.terminate()` is a hard kill); graceful stop there means
+`CTRL_BREAK_EVENT` (handled as SIGBREAK) to a worker started in its own process group,
+or Ctrl+C in its console.
 
 ## 8. Guarantees and non-guarantees
 
@@ -448,6 +485,11 @@ instead of waiting for lease expiry; mark the worker `stopped`.
   retries.
 * Duplicate external effects are prevented **only** where the receiving service
   implements idempotency (the mock notification service does).
+* A `cancelled` run may contain `succeeded` tasks: work that finished before (or
+  racing with) the cancel keeps its result. Cancellation never undoes effects.
+* Python has no equivalent of Go's race detector. Concurrency is verified with
+  multi-threaded and multi-process tests, deterministic lock interleavings, and SQL
+  invariant checks after every scenario (`relayflow.testing.check_invariants`).
 
 ## 9. Task types and the demonstration workflow
 
@@ -522,3 +564,8 @@ Error body: `{"detail": {"code": "...", "message": "..."}}`.
 
 ## Changelog
 * 1.0 (2026-10-01) — initial agreed specification.
+* 1.1 (2026-10-01) — after the independent review (`docs/spec-review.md`): row locks
+  are `FOR NO KEY UPDATE` (fixes claim/cancel deadlock D1); retry-count semantics,
+  oversized output, cancel-when-not-cancelling, expiry-vs-timeout precedence, worker
+  staleness, idempotency-key scope, retry column resets, GIL/heartbeat risk, timing
+  guidance, Windows graceful stop, and succeeded-tasks-in-cancelled-runs made explicit.
