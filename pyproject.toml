@@ -58,6 +58,7 @@ testpaths = ["tests"]
 markers = [
     "integration: needs a real PostgreSQL (RELAYFLOW_TEST_DATABASE_URL)",
     "slow: takes more than ~5 seconds or spawns subprocesses",
+    "stack: drives the Docker Compose stack (RELAYFLOW_STACK_TESTS=1)",
 ]
 timeout = 120
 addopts = "-ra"

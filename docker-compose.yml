@@ -93,14 +93,30 @@ services:
     build: .
     command: ["python", "-m", "mocknotify"]
     environment:
-      MOCKNOTIFY_DATABASE_URL: postgresql+psycopg://relayflow:relayflow@postgres:5432/mocknotify
+      # The receiver has its own PostgreSQL server, so an outage of RelayFlow's database does
+      # not take the receiver down (it is an independent external service).
+      MOCKNOTIFY_DATABASE_URL: postgresql+psycopg://mocknotify:mocknotify@mocknotify-db:5432/mocknotify
       MOCKNOTIFY_HOST: 0.0.0.0
       MOCKNOTIFY_PORT: "8100"
     ports:
       - "127.0.0.1:8100:8100"
     depends_on:
-      postgres: { condition: service_healthy }
+      mocknotify-db: { condition: service_healthy }
     restart: unless-stopped
+
+  mocknotify-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: mocknotify
+      POSTGRES_PASSWORD: mocknotify
+      POSTGRES_DB: mocknotify
+    volumes:
+      - mocknotify-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mocknotify -d mocknotify"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   dashboard:
     build: ./frontend
@@ -112,3 +128,4 @@ services:
 
 volumes:
   pgdata:
+  mocknotify-data:

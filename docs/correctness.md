@@ -4,6 +4,9 @@ Each row maps a guarantee or invariant from `docs/architecture.md` to the tests 
 it. Test ids are `file::test`. Paths are relative to `tests/`. Owner `T` = test agent
 (`tests/correctness/`), `M` = main agent. **Append new rows. Don't reorder existing ones.**
 
+Stack tests (G40, G41) stop and start real containers and run only with
+`RELAYFLOW_STACK_TESTS=1` and the Docker Compose stack: `uv run pytest tests/stack -v`.
+
 How to run the correctness suite (separate database, so it can run alongside other suites):
 
 ```
@@ -58,6 +61,8 @@ call it explicitly.
 | G37 | Mock service deduplicates atomically: duplicate returns the same record, conflicting body 409, missing key 400, 8 concurrent identical requests produce one record with `delivery_count` 8 (9.1) | `integration/test_mocknotify.py` (all) | M | pass |
 | G38 | Dashboard against the real stack: submit → progress → succeeded; cancel a running task; terminal failure → blocked descendants → manual retry → success, with earlier outputs not re-run; status filter | `frontend/e2e/workflow.spec.ts` (Playwright, Chromium) | M | pass (local); CI see STATUS.md |
 | G39 | End-to-end in Docker: kill the container running a task → lease expiry → reassignment to the other worker; completed outputs preserved; crash after notification → one logical notification (`delivery_count` 2); PostgreSQL restart during a run; full restart keeping the volume preserves history; invariants hold after each step | `scripts/demo_recovery.py` (asserting script, not pytest) | M | pass (local); CI see STATUS.md |
+| G40 | PostgreSQL outage **longer than the lease** while a task runs (6.6, 7.3, 8, 9.1). RelayFlow's PostgreSQL is SIGKILLed while `notify` attempt 1 runs and kept down ≥ 2 × lease (14 s, lease 6 s). Asserted: API reports the database unreachable (503) during the outage; the receiver (own database) stays up and records the external effect *during* the outage; after restart, API and workers reconnect without intervention; attempt 1 ends `lease_expired` (expired by the scheduler at or after `lease_expires_at`, ≥ lease after its last heartbeat) and attempt 2 starts only after that; the run succeeds; the receiver holds exactly one record for the key with `delivery_count` 2 and the engine output says `duplicate: true` with the same id; stale `complete`/`fail`/`release` with attempt 1's token return `False` and change nothing, and its heartbeat is not owned; the stale worker's log shows it gave up reporting and never reported attempt 1; invariants hold | `stack/test_postgres_outage.py::test_postgres_outage_longer_than_lease` (Docker stack, `RELAYFLOW_STACK_TESTS=1`) | M | pass |
+| G41 | API-only restart while workers and the scheduler keep running (1, 2). Asserted: with the API container stopped (connections refused), the run is observed in PostgreSQL progressing from `keywords` running to `succeeded`; after the API restarts it serves the same task statuses as the database, the unchanged `validate` output and attempt ids; resubmitting the same key and payload returns 200 with the same run id and `created: false`, a different payload returns 409, and exactly one run exists for the key; invariants hold | `stack/test_api_restart.py::test_api_only_restart_while_workers_continue` (Docker stack) | M | pass |
 
 ## Explicit exclusions (not guaranteed, not tested)
 

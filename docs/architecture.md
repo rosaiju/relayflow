@@ -1,6 +1,6 @@
 # RelayFlow architecture and specification
 
-Version 1.1. This document is the agreed contract for the engine, the API, the
+Version 1.2. This document is the agreed contract for the engine, the API, the
 tests, and the dashboard. If code disagrees with this document, one of them is a
 bug; fix the code or amend this document deliberately (and note it in the
 changelog at the bottom).
@@ -20,9 +20,9 @@ isolation, and it has been exercised only on the environments listed in
                                            │  SQL (short transactions)
  worker-a ─┐                               ▼
  worker-b ─┼──────────────────────▶  PostgreSQL  (database "relayflow")
- scheduler ┘                               ▲
-     │                                     │ (separate database "mocknotify")
-     └── notify task ──HTTP──▶ mocknotify ─┘
+ scheduler ┘
+     │
+     └── notify task ──HTTP──▶ mocknotify ──▶ its own PostgreSQL server (mocknotify-db)
 ```
 
 | Process      | Module                         | Responsibility |
@@ -520,7 +520,8 @@ Registered types (the only executable code):
   injection, same gating.
 
 ### 9.1 Mock notification service
-Separate process and database. `POST /notifications` with header
+Separate process with its own PostgreSQL server (`mocknotify-db` in Docker Compose), so
+an outage of RelayFlow's database does not affect it. `POST /notifications` with header
 `Idempotency-Key` and JSON body. In one transaction it does
 `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`; if the key exists and the
 body hash matches, it returns the **existing** record (200, `"duplicate": true`);
@@ -569,3 +570,6 @@ Error body: `{"detail": {"code": "...", "message": "..."}}`.
   oversized output, cancel-when-not-cancelling, expiry-vs-timeout precedence, worker
   staleness, idempotency-key scope, retry column resets, GIL/heartbeat risk, timing
   guidance, Windows graceful stop, and succeeded-tasks-in-cancelled-runs made explicit.
+* 1.2 (2026-10-01) — the mock notification service gets its own PostgreSQL server in
+  Compose (it previously shared RelayFlow's server, so a RelayFlow database outage also
+  took the "external" receiver down). No engine behaviour changed.

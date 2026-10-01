@@ -92,6 +92,10 @@ jobs:
         run: npx playwright test
       - name: Automated crash-recovery demo
         run: uv run python scripts/demo_recovery.py
+      - name: Stack tests (PostgreSQL outage longer than the lease; API-only restart)
+        env:
+          RELAYFLOW_STACK_TESTS: "1"
+        run: uv run pytest tests/stack -v -p no:cacheprovider
       - name: Service logs
         if: failure()
         run: docker compose logs --no-color --tail 200
