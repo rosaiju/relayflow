@@ -1,0 +1,100 @@
+# RelayFlow local stack. All published ports bind to 127.0.0.1 only.
+# Credentials below are local development/test credentials, not secrets.
+name: relayflow
+
+x-relayflow-env: &relayflow-env
+  RELAYFLOW_DATABASE_URL: postgresql+psycopg://relayflow:relayflow@postgres:5432/relayflow
+  RELAYFLOW_NOTIFY_URL: http://mocknotify:8100
+  RELAYFLOW_LEASE_SECONDS: ${RELAYFLOW_LEASE_SECONDS:-10}
+  RELAYFLOW_HEARTBEAT_SECONDS: ${RELAYFLOW_HEARTBEAT_SECONDS:-3}
+  RELAYFLOW_POLL_INTERVAL_SECONDS: ${RELAYFLOW_POLL_INTERVAL_SECONDS:-0.5}
+  RELAYFLOW_SCHEDULER_INTERVAL_SECONDS: ${RELAYFLOW_SCHEDULER_INTERVAL_SECONDS:-1}
+  RELAYFLOW_WORKER_CONCURRENCY: ${RELAYFLOW_WORKER_CONCURRENCY:-4}
+  RELAYFLOW_ENABLE_FAULT_INJECTION: ${RELAYFLOW_ENABLE_FAULT_INJECTION:-0}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: relayflow
+      POSTGRES_PASSWORD: relayflow
+      POSTGRES_DB: relayflow
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relayflow -d relayflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["python", "-m", "relayflow.migrate"]
+    environment: *relayflow-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    build: .
+    command: ["uvicorn", "--factory", "relayflow.api.app:create_app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *relayflow-env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker-a:
+    build: .
+    command: ["python", "-m", "relayflow.worker"]
+    environment:
+      <<: *relayflow-env
+      RELAYFLOW_WORKER_NAME: worker-a
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    stop_grace_period: 20s
+    restart: "no"   # crash demos kill workers on purpose; start them again explicitly
+
+  worker-b:
+    build: .
+    command: ["python", "-m", "relayflow.worker"]
+    environment:
+      <<: *relayflow-env
+      RELAYFLOW_WORKER_NAME: worker-b
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    stop_grace_period: 20s
+    restart: "no"
+
+  scheduler:
+    build: .
+    command: ["python", "-m", "relayflow.scheduler"]
+    environment: *relayflow-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  mocknotify:
+    build: .
+    command: ["python", "-m", "mocknotify"]
+    environment:
+      MOCKNOTIFY_DATABASE_URL: postgresql+psycopg://relayflow:relayflow@postgres:5432/mocknotify
+      MOCKNOTIFY_HOST: 0.0.0.0
+      MOCKNOTIFY_PORT: "8100"
+    ports:
+      - "127.0.0.1:8100:8100"
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
