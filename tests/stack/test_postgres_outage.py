@@ -15,7 +15,12 @@ before its handler, which gives a controlled window:
             the same Idempotency-Key; the receiver deduplicates; the run completes
 
 Then the stale attempt's token is used directly against the engine: every update must
-be rejected and change nothing.
+be rejected and change nothing. Runs in the disposable `relayflow-stacktest` Compose
+project (see conftest.py), never against the demo database.
+
+This is a process-level outage (the PostgreSQL server process is SIGKILLed; its data
+directory survives on the container volume). It says nothing about power loss or disk
+failure, which depend on PostgreSQL's fsync/WAL guarantees and are not tested.
 """
 
 from __future__ import annotations
@@ -101,6 +106,13 @@ def test_postgres_outage_longer_than_lease(relayflow_db: Engine) -> None:
     victim = task_of(run, "notify")["attempts"][-1]
     assert victim["attempt_number"] == 1
     victim_service = victim["worker_id"].split(":")[0]
+    # Successful results that exist before the outage; they must survive it untouched.
+    succeeded_before = {
+        t["task_key"]: (t["output"], [a["id"] for a in t["attempts"]])
+        for t in run["tasks"]
+        if t["status"] == "succeeded"
+    }
+    assert set(succeeded_before) == {"validate", "word_count", "keywords", "report"}
     assert receiver_records(effect_key) == []  # no effect yet
 
     try:
@@ -162,6 +174,15 @@ def test_postgres_outage_longer_than_lease(relayflow_db: Engine) -> None:
     notify_task = task_row(relayflow_db, run_id, "notify")
     assert notify_task["output"]["duplicate"] is True
     assert notify_task["output"]["notification_id"] == records[0]["id"]
+
+    # 5b. Successful results from before the outage are preserved: same outputs, same
+    #     single attempts (not re-executed); only `notify` ran again (at-least-once).
+    after_run = api_get(f"/runs/{run_id}")
+    for key, (output, attempt_ids) in succeeded_before.items():
+        task = task_of(after_run, key)
+        assert task["status"] == "succeeded"
+        assert task["output"] == output, f"{key} output changed"
+        assert [a["id"] for a in task["attempts"]] == attempt_ids, f"{key} was re-executed"
 
     # 6. Stale updates with attempt 1's token are rejected and change nothing.
     token, attempt_id = first["lease_token"], first["id"]

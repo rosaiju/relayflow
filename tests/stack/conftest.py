@@ -1,12 +1,18 @@
-"""Fixtures for tests that drive the real Docker Compose stack.
+"""Fixtures for tests that drive a real Docker Compose stack.
 
-These tests stop and start real containers (PostgreSQL, the API), so they are opt-in:
-set RELAYFLOW_STACK_TESTS=1 and have Docker available. They use the stack's main
-database (never truncated) and identify their own runs by unique idempotency keys.
+These tests kill and restart real containers, so they are opt-in
+(RELAYFLOW_STACK_TESTS=1) and run in a DISPOSABLE Compose project:
+
+* project name `relayflow-stacktest` -> its own containers, network and volumes;
+* host ports 15433 / 18000 / 18100 / 18080, so it runs beside the demo stack;
+* teardown runs `docker compose -p relayflow-stacktest down -v`, which deletes only
+  that project's volumes. The demo stack (project `relayflow`, volume
+  `relayflow_pgdata`) is never touched.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -22,9 +28,13 @@ from sqlalchemy import Engine
 from relayflow.db import make_engine
 
 ROOT = Path(__file__).resolve().parents[2]
-API = "http://127.0.0.1:8000/api"
-MOCK = "http://127.0.0.1:8100"
-DB_URL = "postgresql+psycopg://relayflow:relayflow@127.0.0.1:5433/relayflow"
+PROJECT = "relayflow-stacktest"
+DEMO_PROJECT = "relayflow"
+PORTS = {"pg": 15433, "api": 18000, "mock": 18100, "dashboard": 18080}
+API = f"http://127.0.0.1:{PORTS['api']}/api"
+MOCK = f"http://127.0.0.1:{PORTS['mock']}"
+DASHBOARD = f"http://127.0.0.1:{PORTS['dashboard']}"
+DB_URL = f"postgresql+psycopg://relayflow:relayflow@127.0.0.1:{PORTS['pg']}/relayflow"
 LEASE_SECONDS = 6.0
 HEARTBEAT_SECONDS = 1.0
 STACK_ENV = {
@@ -32,23 +42,38 @@ STACK_ENV = {
     "RELAYFLOW_HEARTBEAT_SECONDS": str(HEARTBEAT_SECONDS),
     "RELAYFLOW_SCHEDULER_INTERVAL_SECONDS": "0.5",
     "RELAYFLOW_POLL_INTERVAL_SECONDS": "0.2",
+    "RELAYFLOW_ENABLE_FAULT_INJECTION": "0",
+    "RELAYFLOW_PG_PORT": str(PORTS["pg"]),
+    "RELAYFLOW_API_PORT": str(PORTS["api"]),
+    "RELAYFLOW_MOCK_PORT": str(PORTS["mock"]),
+    "RELAYFLOW_DASHBOARD_PORT": str(PORTS["dashboard"]),
 }
-SERVICES = ["postgres", "mocknotify-db", "mocknotify", "api", "scheduler", "worker-a", "worker-b"]
+SERVICES = [
+    "postgres",
+    "mocknotify-db",
+    "mocknotify",
+    "api",
+    "scheduler",
+    "worker-a",
+    "worker-b",
+    "dashboard",
+]
 DOCUMENT = {
     "title": "Stack test document (synthetic)",
     "text": "Gulls circled the pier. The pier creaked; the gulls landed and the tide turned.",
 }
 
-
 STACK_ENABLED = os.environ.get("RELAYFLOW_STACK_TESTS") == "1"
 requires_stack = pytest.mark.skipif(
-    not STACK_ENABLED, reason="stack tests stop real containers; set RELAYFLOW_STACK_TESTS=1"
+    not STACK_ENABLED, reason="stack tests kill real containers; set RELAYFLOW_STACK_TESTS=1"
 )
 
 
 def compose(*args: str, timeout: float = 180) -> str:
+    """`docker compose` scoped to the disposable test project only."""
+    assert PROJECT != DEMO_PROJECT
     result = subprocess.run(
-        ["docker", "compose", *args],
+        ["docker", "compose", "-p", PROJECT, *args],
         cwd=ROOT,
         env={**os.environ, **STACK_ENV},
         capture_output=True,
@@ -59,8 +84,21 @@ def compose(*args: str, timeout: float = 180) -> str:
     output = result.stdout + result.stderr
     if result.returncode != 0:
         command = " ".join(args)
-        raise RuntimeError(f"docker compose {command} failed ({result.returncode}):\n{output}")
+        raise RuntimeError(
+            f"docker compose -p {PROJECT} {command} failed ({result.returncode}):\n{output}"
+        )
     return output
+
+
+def container_identity(service: str) -> tuple[str, str]:
+    """(container id, start time) - changes if the container is recreated or restarted."""
+    container_id = compose("ps", "-q", service).strip()
+    assert container_id, f"{service} is not running"
+    raw = subprocess.run(
+        ["docker", "inspect", container_id], capture_output=True, text=True, check=True
+    ).stdout
+    info = json.loads(raw)[0]
+    return info["Id"], info["State"]["StartedAt"]
 
 
 def poll(predicate: Callable[[], Any], what: str, timeout: float, interval: float = 0.1) -> Any:
@@ -111,19 +149,26 @@ def ensure_stack_ready() -> None:
     compose("up", "-d", *SERVICES, timeout=600)
     poll(lambda: api_get("/health")["status"] == "ok", "API healthy", timeout=120, interval=0.5)
     poll(lambda: healthy_worker_count() >= 2, "two healthy workers", timeout=60, interval=0.5)
+    poll(
+        lambda: httpx.get(f"{DASHBOARD}/api/health", timeout=5).status_code == 200,
+        "dashboard proxy",
+        timeout=60,
+        interval=0.5,
+    )
 
 
 @pytest.fixture(scope="session")
 def stack() -> Iterator[None]:
-    compose("build", timeout=600)
+    compose("down", "-v", "--remove-orphans")  # start from an empty disposable project
+    compose("build", timeout=900)
     ensure_stack_ready()
     yield
-    ensure_stack_ready()  # leave the stack complete even if a test failed midway
+    compose("down", "-v", "--remove-orphans")  # dispose of the test project's volumes only
 
 
 @pytest.fixture
 def relayflow_db(stack: None) -> Iterator[Engine]:
-    """Direct connection to the stack's database for verification (not truncated)."""
+    """Direct connection to the disposable stack's database, for verification."""
     eng = make_engine(DB_URL, pool_size=2)
     yield eng
     eng.dispose()

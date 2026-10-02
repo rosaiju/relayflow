@@ -2,91 +2,102 @@
 
 _Last updated: 2026-10-01._ Read this first when resuming work.
 
-## State: all five milestones complete
+## State: complete, feature-frozen
+
+Feature development is frozen. Only bug fixes and verification changes should be made.
 
 | # | Milestone | Commit |
 |---|---|---|
 | 1–2 | Spec (state machines, every transition), schema with DB-enforced invariants, engine, worker, scheduler, mock service, API, Compose stack, unit and integration tests | `c550a36` |
 | 3 | Independent correctness suite (test agent); claim/cancel deadlock found and fixed; spec v1.1 | `159ba43` |
 | 4 | React/TypeScript dashboard + Playwright e2e | `a4dad8c` |
-| 5 | Crash-recovery demo, benchmarks, CI, documentation | `064da3b`, `40c6fff` (CI pin fix) |
-| follow-up | Closed two verification gaps: PostgreSQL outage longer than the lease; API-only restart (stack tests, in CI) | see `git log` |
+| 5 | Crash-recovery demo, benchmarks, CI, documentation | `064da3b`, `40c6fff` |
+| follow-ups | Stack tests for a PostgreSQL outage longer than the lease and an API-only restart; receiver gets its own database; dashboard proxy re-resolves the API; final verification in a disposable environment | `fa5803b`, `2e39c2e`, final closeout commit (see `git log`) |
 
-The repository is private: https://github.com/rosaiju/relayflow (default branch `main`).
+Repository (private): https://github.com/rosaiju/relayflow, default branch `main`.
 
-## Verification actually performed
+### Academic Advisor integration: isolated, not part of `main`
 
-| Check | Environment | Result |
-|---|---|---|
-| `ruff format --check`, `ruff check`, `mypy --strict` (34 files) | Windows 11 (local) and GitHub Actions ubuntu-latest | pass |
-| pytest unit (38) | Windows local + CI | pass |
-| pytest integration + correctness (112, real PostgreSQL 17, includes subprocess crash tests) | Windows local (PostgreSQL in Docker Desktop) + CI (PostgreSQL service container) | pass. Full local run: 150 passed in 75 s |
-| Frontend `tsc -b` + `vite build` | Windows local + CI | pass |
-| Playwright e2e, 5 tests (Chromium) against the Docker stack with fault injection | Windows local + CI | pass |
-| `scripts/demo_recovery.py` (asserting crash-recovery demo, all 8 steps) | Windows 11 + Docker Desktop (WSL2), and CI ubuntu-latest | pass on both |
-| `scripts/bench.py` | Windows 11 + Docker Desktop only (see BENCHMARKS.md) | results recorded |
-| Stack test: PostgreSQL outage > lease (`tests/stack/test_postgres_outage.py`) | Windows 11 + Docker Desktop: 5 consecutive passes after the fixes below (and 10 of 13 runs before them); also run in CI (e2e job) | pass |
-| Stack test: API-only restart (`tests/stack/test_api_restart.py`) | Windows 11 + Docker Desktop: 6 consecutive passes; also run in CI (e2e job) | pass |
-| GitHub Actions run 36916722830 on `40c6fff` | backend, frontend, e2e+demo jobs | **all success** |
+A separate session explored running Academic Advisor work through RelayFlow:
+- In this repo it lives only on the **local** branch `integration/academic-advisor`
+  (3 commits on top of `2e39c2e`). It has never been pushed and is not merged; `main`
+  contains none of it.
+- The Academic Advisor team repository (`C:\Users\rohan\advisor-ai`, remote
+  `rosaiju/multimodal-academic-advisor`) has no commits since 2026-10-01, no relayflow
+  branch locally or on its remote, and a clean working tree. That experiment left one
+  local stash entry there, with its content kept in a separate clone that has no
+  remote (`C:\Users\rohan\advisor-relayflow-lab\advisor-ai`).
+- Nothing in that repository was modified or pushed by the RelayFlow closeout.
 
-The first CI run (36916622763) failed at setup because `astral-sh/setup-uv@v10` has no
-floating major tag. Fixed by pinning `v10.2.0`.
+## Final verification (2026-10-01, closeout pass)
 
-Bugs found during verification, all fixed:
-1. `doc.report` read a non-direct dependency's output. Found by the first live run;
-   fixed and recovered with a real manual retry.
-2. Claim/cancel deadlock (`FOR UPDATE` vs foreign-key `KEY SHARE`). Found by the
-   independent test agent (D1 in `docs/spec-review.md`).
-3. Worker heartbeat thread could overwrite the final `stopped` status. Found in code
-   review; fixed by joining the thread first.
-4. The first benchmark measured the client's submission speed. Discarded and
-   redesigned (BENCHMARKS.md).
+All of the following were run in this pass on Windows 11 + Docker Desktop (WSL2).
+CI (GitHub Actions, ubuntu-latest) runs the same checks on every push to `main`.
 
-## Known limitations and things not verified
+| Check | Result |
+|---|---|
+| `ruff format --check`, `ruff check`, `mypy --strict` (34 source files) | pass |
+| pytest (unit 38 + integration/correctness 112, real PostgreSQL 17; stack tests skipped unless enabled) | 150 passed, 2 skipped |
+| Frontend `tsc -b` + `vite build` | pass |
+| Playwright e2e, 5 tests (Chromium), against the demo stack with fault injection | 5 passed |
+| `scripts/demo_recovery.py` (8 asserted steps: killed worker, crash after notification delivery, PostgreSQL restart mid-run, full restart keeping the volume) | passed |
+| Stack test G40 `test_postgres_outage_longer_than_lease` (disposable project) | 3/3 consecutive passes |
+| Stack test G41 `test_api_only_restart_while_workers_continue` (disposable project) | 3/3 consecutive passes, after fixing the bug it found (below) |
+| Demo database not reset | earliest run (2026-10-01 19:09:08 UTC) still present; the run count only grew (2390 → 2396, the runs added by e2e and the demo) |
+| `scripts/bench.py` | **not rerun.** Nothing on the measured path changed (engine, worker, scheduler, benchmark script); BENCHMARKS.md results from 2026-10-01 stand |
 
-- At-least-once only. Cooperative timeouts and cancellation. Polling, not LISTEN/NOTIFY.
-- Closed gap 1: a PostgreSQL outage longer than the lease is now tested end to end
-  (G40 in `docs/correctness.md`). The outage is a SIGKILL of PostgreSQL (crash, then
-  WAL recovery on restart) lasting 14 s with a 6 s lease. A graceful database shutdown
-  of the same length is not separately tested. The demo script's quick (~1 s)
-  restart still only shows reconnection.
-- Closed gap 2: an API-only restart while workers and the scheduler run is tested (G41).
-- Fixing gap 1 exposed a test-environment flaw: the mock receiver shared RelayFlow's
-  PostgreSQL server, so a RelayFlow database outage also took the "external" service
-  down. In Compose it now has its own server (`mocknotify-db`); no engine code changed.
-- While stabilizing the outage test, it failed 3 times in 13 early runs:
-  - Two were fixture setup errors, confirmed from the traceback: `docker compose up
-    --wait` exited 1. Likely reason: the API container is briefly *unhealthy* right
-    after an outage (its healthcheck checks the database), and `--wait` fails on that.
-    Fix: poll real readiness (API health, healthy workers) instead of `--wait`.
-  - One was a failure inside the test whose output I did not capture, so its cause is
-    **unconfirmed**. The most likely candidate is the synchronization guard:
-    `docker compose stop postgres` (clean shutdown plus CLI overhead) can exceed the
-    3.5 s window, and the guard then fails rather than passes. Fix: `docker compose
-    kill` for an instantaneous outage, with the measured lag now in the failure
-    message. No assertion was weakened, and the test has not failed since.
-- iOS/macOS were not tested; neither was Linux outside CI. Benchmarks were taken on
-  one laptop only.
-- Hard-killed workers stay `active` in the `workers` table. The dashboard derives
-  staleness and collapses old instances.
-- Playwright's `screenshots.mjs` is a helper, not a test.
-- `fastapi.testclient` emits a Starlette deprecation warning about `httpx`. This is
+**Stack tests run in a disposable environment.** `tests/stack` uses its own Compose
+project (`relayflow-stacktest`, ports 15433/18000/18100/18080), created empty and
+removed with its volumes afterwards. The demo stack (project `relayflow`, volumes
+`relayflow_pgdata` and `relayflow_mocknotify-data`) is never touched. Enable with
+`RELAYFLOW_STACK_TESTS=1`.
+
+### Bugs found by verification (all fixed, no assertions weakened)
+1. `doc.report` read a non-direct dependency's output. Found by the first live run.
+2. Claim/cancel deadlock (`FOR UPDATE` vs the foreign-key `KEY SHARE` lock). Found by
+   the independent test agent (D1 in `docs/spec-review.md`).
+3. The worker heartbeat thread could overwrite the final `stopped` status. Found in
+   code review.
+4. The first benchmark measured the client's submission speed. Discarded and redesigned.
+5. The mock receiver shared RelayFlow's PostgreSQL server, so an engine database
+   outage also took the "external" service down. It now has its own server.
+6. The dashboard proxy (nginx) resolved `api` once at startup, so recreating only the
+   API container returned 502. Found while running the site.
+7. **The dashboard's connection indicator stayed "Connected" during an API outage**
+   behind the proxy: the proxy's 502 HTML page failed JSON parsing, and the previous
+   state was kept. Found by G41 in this pass (the test failed at "no DOWN within 30s");
+   fixed in `frontend/src/components/Layout.tsx`.
+
+The outage test's earlier flaky runs (3 of 13, before 2026-10-01's fixes) came from the
+test harness: `compose up --wait` exiting during API recovery (confirmed), plus one
+failure whose output was not captured (cause unconfirmed; most likely the
+synchronization window with a graceful `stop`). The test now uses `kill` and readiness
+polling, and has passed every run since: 5 earlier and 3 in this pass.
+
+## Genuine remaining gaps
+
+- **Process crash is not power loss.** All crash testing kills processes (worker
+  containers, `os._exit`, SIGKILL of the PostgreSQL server process, backend
+  termination); the OS and disk survive. Durability under power loss, torn writes or
+  disk failure depends on PostgreSQL's WAL/fsync and hardware and is not tested.
+- A graceful PostgreSQL shutdown lasting longer than the lease is not tested
+  separately; only the SIGKILL outage is (G40).
+- Execution is at-least-once by design. A duplicate external effect is prevented only
+  by receivers that implement idempotency, as the mock service does.
+- Timeouts and cancellation are cooperative, and dispatch uses polling.
+- Verified environments: Windows 11 + Docker Desktop, and GitHub Actions ubuntu-latest.
+  Benchmarks come from one laptop.
+- Hard-killed workers stay `active` in the `workers` table; staleness is derived when
+  the table is read.
+- `fastapi.testclient` emits a Starlette deprecation warning about `httpx`; it is
   harmless at the pinned versions.
-
-## Exact next steps (optional improvements)
-
-1. LISTEN/NOTIFY wakeups to cut dispatch latency below the poll interval (keep
-   polling as the fallback).
-2. (Done: see G40.) Optionally add a graceful-shutdown variant of the outage test.
-3. Retention/archiving for `events` and `attempts`; an index review at larger volume.
-4. Optional subprocess isolation for handlers, so timeouts can be enforced hard.
-5. Have the scheduler mark long-silent workers `stopped`.
 
 ## Resuming
 
 ```powershell
 cd C:\Users\rohan\projects\relayflow
-docker compose up -d --build
-uv sync; uv run pytest
+docker compose up -d --build                     # dashboard http://127.0.0.1:8080
+uv sync; uv run pytest                           # needs the compose postgres on 5433
+$env:RELAYFLOW_STACK_TESTS="1"; uv run pytest tests/stack -v   # disposable project
 ```
 Follow `CLAUDE.md` for the commit/push rules.

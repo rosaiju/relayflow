@@ -5,6 +5,7 @@ dashboard. Not production software. Read `STATUS.md` first, then
 `docs/architecture.md` (the specification; code must match it).
 
 ## Scope
+- **Feature-frozen (2026-10-01).** Only bug fixes and verification changes.
 - Orchestration is implemented here: no Celery/Temporal/Hatchet/Prefect or other engine.
 - PostgreSQL is the only coordination mechanism. Never AnchorDB, never SQLite in tests.
 - The API never executes tasks (no FastAPI BackgroundTasks for durable work).
@@ -23,9 +24,11 @@ uv run pytest                           # all tests (needs postgres on 127.0.0.1
 uv run ruff format --check . ; uv run ruff check . ; uv run mypy
 cd frontend; npm ci; npm run typecheck; npm run build; npx playwright test
 uv run python scripts/demo_recovery.py  # automated crash-recovery demo (Docker)
+RELAYFLOW_STACK_TESTS=1 uv run pytest tests/stack -v   # disposable project "relayflow-stacktest"
 uv run python scripts/bench.py          # benchmarks (do not run alongside tests)
 ```
-Never run `docker compose down -v` unless the user asks: it deletes the database volume.
+Never run `docker compose down -v` on the demo project unless the user asks: it deletes the
+database volume. (The stack tests' `down -v` is scoped to `-p relayflow-stacktest` only.)
 
 ## Commit and push rules
 - Commit each meaningful, verified change with a descriptive message, then push.

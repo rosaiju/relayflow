@@ -1,4 +1,5 @@
-# RelayFlow local stack. All published ports bind to 127.0.0.1 only.
+# RelayFlow local stack. All published ports bind to 127.0.0.1 only. Host ports can be
+# overridden (RELAYFLOW_*_PORT) so a disposable test project can run beside the demo stack.
 # Credentials below are local development/test credentials, not secrets.
 name: relayflow
 
@@ -20,7 +21,7 @@ services:
       POSTGRES_PASSWORD: relayflow
       POSTGRES_DB: relayflow
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:${RELAYFLOW_PG_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -45,7 +46,7 @@ services:
     command: ["uvicorn", "--factory", "relayflow.api.app:create_app", "--host", "0.0.0.0", "--port", "8000"]
     environment: *relayflow-env
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${RELAYFLOW_API_PORT:-8000}:8000"
     depends_on:
       migrate: { condition: service_completed_successfully }
     healthcheck:
@@ -99,7 +100,7 @@ services:
       MOCKNOTIFY_HOST: 0.0.0.0
       MOCKNOTIFY_PORT: "8100"
     ports:
-      - "127.0.0.1:8100:8100"
+      - "127.0.0.1:${RELAYFLOW_MOCK_PORT:-8100}:8100"
     depends_on:
       mocknotify-db: { condition: service_healthy }
     restart: unless-stopped
@@ -121,7 +122,7 @@ services:
   dashboard:
     build: ./frontend
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:${RELAYFLOW_DASHBOARD_PORT:-8080}:80"
     depends_on:
       api: { condition: service_healthy }
     restart: unless-stopped

@@ -8,10 +8,19 @@ interface Health {
   fault_injection: boolean;
 }
 
+const UNREACHABLE: Health = { status: "unreachable", database: "unknown", fault_injection: false };
+
 async function loadHealth(): Promise<Health> {
   const response = await fetch("/api/health").catch(() => null);
-  if (!response) return { status: "unreachable", database: "unknown", fault_injection: false };
-  return (await response.json()) as Health;
+  if (!response) return UNREACHABLE;
+  // The API answers 200 or 503 with JSON. Anything else (e.g. the dashboard proxy's 502 HTML
+  // page while the API is down) means the API itself is unreachable. Returning a value here,
+  // rather than throwing, makes the indicator update instead of keeping the last good state.
+  try {
+    return (await response.json()) as Health;
+  } catch {
+    return UNREACHABLE;
+  }
 }
 
 function Connection() {

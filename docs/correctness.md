@@ -4,8 +4,18 @@ Each row maps a guarantee or invariant from `docs/architecture.md` to the tests 
 it. Test ids are `file::test`. Paths are relative to `tests/`. Owner `T` = test agent
 (`tests/correctness/`), `M` = main agent. **Append new rows. Don't reorder existing ones.**
 
-Stack tests (G40, G41) stop and start real containers and run only with
-`RELAYFLOW_STACK_TESTS=1` and the Docker Compose stack: `uv run pytest tests/stack -v`.
+Stack tests (G40, G41) kill and restart real containers. They run only with
+`RELAYFLOW_STACK_TESTS=1`, in a **disposable** Compose project (`relayflow-stacktest`,
+ports 15433/18000/18100/18080) that is created from scratch and removed with its volumes
+afterwards. They never touch the demo stack or its database:
+`uv run pytest tests/stack -v`.
+
+**Process crashes are not power loss.** Every crash in this suite (killed worker
+containers, `os._exit`, SIGKILL of the PostgreSQL server process, backend termination)
+leaves the operating system, the page cache and the disk intact. They test RelayFlow's
+recovery logic on top of PostgreSQL, not PostgreSQL's durability under power failure,
+torn writes or disk loss. Those depend on PostgreSQL's WAL and fsync configuration and
+on the hardware, and are untested here (see the exclusions table).
 
 How to run the correctness suite (separate database, so it can run alongside other suites):
 
@@ -61,8 +71,8 @@ call it explicitly.
 | G37 | Mock service deduplicates atomically: duplicate returns the same record, conflicting body 409, missing key 400, 8 concurrent identical requests produce one record with `delivery_count` 8 (9.1) | `integration/test_mocknotify.py` (all) | M | pass |
 | G38 | Dashboard against the real stack: submit → progress → succeeded; cancel a running task; terminal failure → blocked descendants → manual retry → success, with earlier outputs not re-run; status filter | `frontend/e2e/workflow.spec.ts` (Playwright, Chromium) | M | pass (local); CI see STATUS.md |
 | G39 | End-to-end in Docker: kill the container running a task → lease expiry → reassignment to the other worker; completed outputs preserved; crash after notification → one logical notification (`delivery_count` 2); PostgreSQL restart during a run; full restart keeping the volume preserves history; invariants hold after each step | `scripts/demo_recovery.py` (asserting script, not pytest) | M | pass (local); CI see STATUS.md |
-| G40 | PostgreSQL outage **longer than the lease** while a task runs (6.6, 7.3, 8, 9.1). RelayFlow's PostgreSQL is SIGKILLed while `notify` attempt 1 runs and kept down ≥ 2 × lease (14 s, lease 6 s). Asserted: API reports the database unreachable (503) during the outage; the receiver (own database) stays up and records the external effect *during* the outage; after restart, API and workers reconnect without intervention; attempt 1 ends `lease_expired` (expired by the scheduler at or after `lease_expires_at`, ≥ lease after its last heartbeat) and attempt 2 starts only after that; the run succeeds; the receiver holds exactly one record for the key with `delivery_count` 2 and the engine output says `duplicate: true` with the same id; stale `complete`/`fail`/`release` with attempt 1's token return `False` and change nothing, and its heartbeat is not owned; the stale worker's log shows it gave up reporting and never reported attempt 1; invariants hold | `stack/test_postgres_outage.py::test_postgres_outage_longer_than_lease` (Docker stack, `RELAYFLOW_STACK_TESTS=1`) | M | pass |
-| G41 | API-only restart while workers and the scheduler keep running (1, 2). Asserted: with the API container stopped (connections refused), the run is observed in PostgreSQL progressing from `keywords` running to `succeeded`; after the API restarts it serves the same task statuses as the database, the unchanged `validate` output and attempt ids; resubmitting the same key and payload returns 200 with the same run id and `created: false`, a different payload returns 409, and exactly one run exists for the key; invariants hold | `stack/test_api_restart.py::test_api_only_restart_while_workers_continue` (Docker stack) | M | pass |
+| G40 | **PostgreSQL unavailable longer than the lease while a workflow is active** (6.6, 7.3, 8, 9.1). In a disposable Compose project, RelayFlow's PostgreSQL server process is SIGKILLed while `notify` attempt 1 runs and kept down ≥ 2 × lease (14 s, lease 6 s). Asserted: API reports the database unreachable (503) during the outage; the receiver (own database) stays up and records the external effect *during* the outage; after restart, API and workers reconnect without intervention; attempt 1 ends `lease_expired` (expired by the scheduler at or after `lease_expires_at`, ≥ lease after its last heartbeat) and attempt 2 starts only after that; the run succeeds; **the four tasks that succeeded before the outage keep identical outputs and their single original attempt (not re-executed)**; the receiver holds exactly one record for the key with `delivery_count` 2 and the engine output says `duplicate: true` with the same id (repeat execution allowed, side effect deduplicated); stale `complete`/`fail`/`release` with attempt 1's token return `False` and change nothing, and its heartbeat is not owned; the stale worker's log shows it gave up reporting and never reported attempt 1; invariants hold | `stack/test_postgres_outage.py::test_postgres_outage_longer_than_lease` | M | pass |
+| G41 | **API-only restart while a workflow is active** (1, 2). PostgreSQL, both workers, the scheduler, the dashboard and the mock service keep running: their container ids and start times are asserted unchanged, while the API's start time changes. Asserted: with the API stopped (connections refused; the dashboard proxy answers 502), the run is observed in PostgreSQL going from `keywords` running to `succeeded`; an already-open dashboard page (real Chromium, never reloaded) switches its indicator to "API unreachable" and then back to "Connected" and shows the run as succeeded; after the restart the API serves the same task statuses as the database and the unchanged `validate` output and attempt ids; resubmitting the same key and payload returns 200 with the same run id and `created: false`, a different payload returns 409, and exactly one run exists for the key; invariants hold. This test found and now guards a dashboard bug: the indicator stayed "Connected" during an API outage behind the proxy | `stack/test_api_restart.py::test_api_only_restart_while_workers_continue` (+ `frontend/e2e/connection-watch.mjs`) | M | pass |
 
 ## Explicit exclusions (not guaranteed, not tested)
 
@@ -70,7 +80,7 @@ call it explicitly.
 |---|---|
 | Exactly-once execution | Not provided (spec 8). A handler may run more than once: after a crash between effect and acknowledgement, or after a slow worker's lease expires. G28 checks at-least-once plus receiver idempotency instead. |
 | Duplicate external effects at receivers *without* idempotency | Lease tokens protect only RelayFlow's tables (7.3). A stale process can still call external services. |
-| Durability beyond PostgreSQL's own guarantees (power loss, disk failure, `fsync=off`) | We rely on PostgreSQL WAL and fsync. There are no power-cut tests. |
+| Durability beyond PostgreSQL's own guarantees (power loss, disk failure, `fsync=off`) | We rely on PostgreSQL WAL and fsync. There are no power-cut tests. Killing the PostgreSQL *process* (G40, demo) is a process crash, not a power loss: committed data still sits in the OS page cache and on disk. |
 | Data-race detection inside Python | Python has no equivalent of Go's `-race`. We use multi-thread tests with `threading.Barrier`, multi-process tests, deterministic lock interleavings (an admin row lock pauses a real operation at a known point), and invariant SQL after every scenario. |
 | Stopping a stuck handler | Python threads can't be killed. Timeouts are cooperative, and the scheduler backstop only re-queues the task. The stuck thread keeps its slot (7.2). |
 | Worker clock skew | All ownership decisions use PostgreSQL `now()`. Worker clocks are only used for local fail-safe deadlines. |

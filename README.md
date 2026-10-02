@@ -97,7 +97,7 @@ uv run pytest                          # everything: needs the compose postgres 
 uv run ruff format --check . ; uv run ruff check . ; uv run mypy
 cd frontend; npm ci; npm run typecheck; npm run build
 npx playwright install chromium; npx playwright test   # needs the stack running with fault injection
-cd ..; $env:RELAYFLOW_STACK_TESTS="1"; uv run pytest tests/stack -v   # stops/starts real containers: PostgreSQL outage > lease, API-only restart
+cd ..; $env:RELAYFLOW_STACK_TESTS="1"; uv run pytest tests/stack -v   # disposable Compose project: PostgreSQL outage > lease, API-only restart
 ```
 
 Integration tests use real PostgreSQL, never SQLite. `tests/correctness/` was written
