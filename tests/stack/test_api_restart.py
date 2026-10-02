@@ -139,10 +139,10 @@ def test_api_only_restart_while_workers_continue(relayflow_db: Engine) -> None:
             # 2. Stop only the API.
             compose("stop", "api")
             assert api_down(), "API should refuse connections while its container is stopped"
-            proxied = httpx.get(f"{DASHBOARD}/api/health", timeout=10)
-            assert proxied.status_code == 502, (
-                "dashboard proxy should report the API as unreachable"
-            )
+            # The proxy must report the API as unreachable promptly: 502 (no route / refused)
+            # or 504 (connect timeout, while nginx still holds the stopped container's IP).
+            proxied = httpx.get(f"{DASHBOARD}/api/health", timeout=5)
+            assert proxied.status_code in (502, 504), f"proxy answered {proxied.status_code}"
             status, tasks = db_status(relayflow_db, run_id)
             assert status == "running" and tasks["keywords"] == "running"
             browser.expect("DOWN", timeout=30)  # the open page noticed the outage

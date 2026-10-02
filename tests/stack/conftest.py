@@ -168,7 +168,9 @@ def stack() -> Iterator[None]:
 
 @pytest.fixture
 def relayflow_db(stack: None) -> Iterator[Engine]:
-    """Direct connection to the disposable stack's database, for verification."""
+    """Direct connection to the disposable stack's database, for verification. Waits for
+    the whole stack to be ready first, so one test's restarts cannot leak into the next."""
+    ensure_stack_ready()
     eng = make_engine(DB_URL, pool_size=2)
     yield eng
     eng.dispose()
