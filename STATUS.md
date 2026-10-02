@@ -14,7 +14,7 @@ Feature development is frozen. Only bug fixes and verification changes should be
 | 5 | Crash-recovery demo, benchmarks, CI, documentation | `064da3b`, `40c6fff` |
 | follow-ups | Stack tests for a PostgreSQL outage longer than the lease and an API-only restart; receiver gets its own database; dashboard proxy re-resolves the API; final verification in a disposable environment | `fa5803b`, `2e39c2e`, final closeout commit (see `git log`) |
 
-Repository (private): https://github.com/rosaiju/relayflow, default branch `main`.
+Repository (public since 2026-10-01): https://github.com/rosaiju/relayflow, default branch `main`.
 
 ### Academic Advisor integration: isolated, not part of `main`
 

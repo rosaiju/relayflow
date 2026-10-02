@@ -37,5 +37,6 @@ database volume. (The stack tests' `down -v` is scoped to `-p relayflow-stacktes
   build output, and binaries before committing.
 - Never rewrite history, change commit dates, create empty commits, or change
   global git config. Repo-local author: `Rohan Sainju <rosaiju@users.noreply.github.com>`.
-- The repository `rosaiju/relayflow` is private; keep it private.
+- The repository `rosaiju/relayflow` is **public** (made public 2026-10-01 at the user's request, after a
+  full-history scan for secrets and personal data). Never commit secrets, `.env` files or local data.
 - Record unverified or skipped checks honestly in `STATUS.md`.
