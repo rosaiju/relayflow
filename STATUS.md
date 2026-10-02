@@ -39,10 +39,10 @@ CI (GitHub Actions, ubuntu-latest) runs the same checks on every push to `main`.
 | `ruff format --check`, `ruff check`, `mypy --strict` (34 source files) | pass |
 | pytest (unit 38 + integration/correctness 112, real PostgreSQL 17; stack tests skipped unless enabled) | 150 passed, 2 skipped |
 | Frontend `tsc -b` + `vite build` | pass |
-| Playwright e2e, 5 tests (Chromium), against the demo stack with fault injection | 5 passed |
+| Playwright e2e, 5 tests (Chromium), against the demo stack with fault injection | 5 passed (again after the proxy fix) |
 | `scripts/demo_recovery.py` (8 asserted steps: killed worker, crash after notification delivery, PostgreSQL restart mid-run, full restart keeping the volume) | passed |
-| Stack test G40 `test_postgres_outage_longer_than_lease` (disposable project) | 3/3 consecutive passes |
-| Stack test G41 `test_api_only_restart_while_workers_continue` (disposable project) | 3/3 consecutive passes, after fixing the bug it found (below) |
+| Stack test G40 `test_postgres_outage_longer_than_lease` (disposable project) | 3/3 consecutive passes, then 2/2 after the CI-found proxy fix |
+| Stack test G41 `test_api_only_restart_while_workers_continue` (disposable project) | 3/3 consecutive passes after fixing the bug it found, then 2/2 after the CI-found proxy fix (below) |
 | Demo database not reset | earliest run (2026-10-01 19:09:08 UTC) still present; the run count only grew (2390 → 2396, the runs added by e2e and the demo) |
 | `scripts/bench.py` | **not rerun.** Nothing on the measured path changed (engine, worker, scheduler, benchmark script); BENCHMARKS.md results from 2026-10-01 stand |
 
@@ -67,12 +67,21 @@ removed with its volumes afterwards. The demo stack (project `relayflow`, volume
    behind the proxy: the proxy's 502 HTML page failed JSON parsing, and the previous
    state was kept. Found by G41 in this pass (the test failed at "no DOWN within 30s");
    fixed in `frontend/src/components/Layout.tsx`.
+8. **Linux only, found by CI** (run 36944143147 failed both stack tests): with the API
+   container stopped, requests through the dashboard proxy hung past 10 s, because
+   nginx kept the stopped container's address and waited out its 60 s default connect
+   timeout. Windows refuses the connection, so it passed locally. Fixed with
+   `proxy_connect_timeout 2s`. The test now requires an answer within 5 s and accepts
+   502 or 504 (both mean the proxy could not reach the API). The second CI failure in
+   that run was a cascade: the next test submitted before the restarted API was ready.
+   Each stack test now waits for full readiness. The rerun on `b40ebbd` passed.
 
 The outage test's earlier flaky runs (3 of 13, before 2026-10-01's fixes) came from the
 test harness: `compose up --wait` exiting during API recovery (confirmed), plus one
 failure whose output was not captured (cause unconfirmed; most likely the
 synchronization window with a graceful `stop`). The test now uses `kill` and readiness
-polling, and has passed every run since: 5 earlier and 3 in this pass.
+polling. Since then it has passed every local run (5 earlier, 5 in this pass); its only
+failure in CI was the cascade described in bug 8.
 
 ## Genuine remaining gaps
 
